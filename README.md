@@ -68,41 +68,25 @@ python uninstall.py --confirm
 
 ## Usage in Hopper
 
-Once installed, the FastMCP server will be available as a script in Hopper.
+Once installed, the Hopper script is triggered on demand by `hopper_mcp_bridge.py`.
+Each MCP call writes one request file, runs `Scripts > Hopper MCP Start Server`
+inside Hopper, writes one response file, and exits immediately. Hopper may show
+`Executing Python Script...` briefly for each request, but there is no long-lived
+foreground Python task.
 
-### Starting the Server
+### String Cache
 
-After running the script in Hopper, you'll need to launch the MCP server through the Python prompt:
+Due to slow Hopper string APIs, the plugin can create optimized string caches for
+better performance. This process takes about 5-10 minutes per document and saves
+caches alongside your Hopper document saves.
 
-1. **First Time Setup - Cache Strings (Recommended)**
-   
-   Due to slow Hopper string APIs, the plugin creates optimized string caches for better performance. This process takes about 5-10 minutes per document and saves caches alongside your Hopper document saves.
-   
-   In the Hopper Python prompt, paste:
-   ```python
-   cache_strings()
-   ```
-   
-   Wait for caching to complete, then launch the server:
-   ```python
-   launch_server()
-   ```
+In the Hopper Python prompt, paste:
 
-2. **Quick Start (Skip Caching)**
-   
-   To start immediately without caching (slower string searches):
-   ```python
-   launch_server()
-   ```
+```python
+cache_strings()
+```
 
-3. **Subsequent Uses**
-   
-   If you've already cached strings for your documents:
-   ```python
-   launch_server()
-   ```
-
-The server will run on `http://localhost:42069/mcp/` and provide the following tools:
+The on-demand runner provides the following tools:
 
 ### Document Management
 

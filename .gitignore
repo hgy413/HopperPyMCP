@@ -1,0 +1,4 @@
+.venv/
+__pycache__/
+*.pyc
+fastmcp_server_configured.py

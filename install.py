@@ -17,6 +17,8 @@ import subprocess
 import argparse
 from pathlib import Path
 
+HOPPER_SCRIPT_NAME = 'Hopper MCP Start Server.py'
+
 
 def detect_python_environment():
     """Detect current Python environment and return environment information."""
@@ -273,7 +275,7 @@ def main():
         
         # 7. Install to Hopper directory
         hopper_dir = get_hopper_script_dir()
-        target_path = os.path.join(hopper_dir, 'fastmcp_server.py')
+        target_path = os.path.join(hopper_dir, HOPPER_SCRIPT_NAME)
         
         if args.dry_run:
             print(f"🔍 Would create directory: {hopper_dir}")

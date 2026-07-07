@@ -7,24 +7,51 @@ Provides tools for analyzing binary files, disassembling procedures, and managin
 import sys
 import os
 
-# Add the specified Python path for plugin architecture
-# Do NOT add any imports before this block other than 'sys' and 'os'
-if not "python" in sys.executable:
-    sys.path.insert(0, '{{PYTHON_LIB_DYNLOAD}}')
-    sys.path.insert(0, '{{PYTHON_LIB_PATH}}')
-    sys.path.insert(0, '{{PYTHON_SITE_PACKAGES}}')
-
 import re
-import threading
 import json
-from typing import Annotated
-from pydantic import Field
+import time
+import traceback
+from typing import Annotated, TYPE_CHECKING
 
-from typing import TYPE_CHECKING
+IN_HOPPER = "python" not in os.path.basename(sys.executable).lower()
+LOG_PATH = "/tmp/hopper_mcp_start.log"
+REQUEST_DIR = "/tmp/hopper_mcp_requests"
+REQUEST_SUFFIX = ".request.json"
+RUNNING_SUFFIX = ".running.json"
+RESPONSE_SUFFIX = ".response.json"
+
+def _log(message):
+    if not IN_HOPPER:
+        return
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as log_file:
+            log_file.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+    except Exception:
+        pass
+
+_log(f"script loaded with executable={sys.executable}")
 
 # This import must be conditional because hopper imports it automatically when run as a plugin
-if TYPE_CHECKING or "python" in sys.executable:
+if TYPE_CHECKING or not IN_HOPPER:
     from tests.hopper_api import Document, Procedure, Segment
+
+if IN_HOPPER:
+    # Hopper v4 embeds Python 3.9, while current FastMCP requires Python 3.10+.
+    # Keep the Hopper-side script stdlib-only; Codex talks through request files.
+    def Field(*args, **kwargs):
+        return {"args": args, **kwargs}
+
+    class LocalToolRegistry:
+        def __init__(self, name):
+            self.name = name
+            self.tools = {}
+
+        def tool(self, func):
+            self.tools[func.__name__] = func
+            return func
+else:
+    from pydantic import Field
+    from fastmcp import FastMCP
 
 # Monkey patch sys.stdout.isatty() to return False
 def _isatty_false():
@@ -32,15 +59,13 @@ def _isatty_false():
 
 sys.stdout.isatty = _isatty_false
 
-from fastmcp import FastMCP
-
 doc = Document.getCurrentDocument()
 
 # Global cache for segment strings
 _segment_strings_cache = {}
 
 # Create a FastMCP server instance
-mcp = FastMCP(name="Simple Test MCP Server")
+mcp = LocalToolRegistry(name="Hopper MCP Runner") if IN_HOPPER else FastMCP(name="Hopper MCP")
 
 ############## Helper functions for common operations #################3
 def is_hopper_not_found(value):
@@ -1224,38 +1249,127 @@ def mark_data_type_at_address(
     else:
         return f"Failed to mark address 0x{address:x} as {data_type}"
 
-################################ MCP SERVER ###################################
+################################ MCP REQUEST RUNNER ############################
 
-def run_server():
-    mcp.run(transport="http", host="127.0.0.1", port=42069)
+def _json_dump_atomic(path, payload):
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    with open(tmp_path, "w", encoding="utf-8") as output_file:
+        json.dump(payload, output_file, default=str)
+    os.replace(tmp_path, path)
 
-def launch_server():
-    print("Starting FastMCP server on port 42069...")
-    
-    server_thread = threading.Thread(target=run_server, daemon=True)  # Non-daemon so it keeps process alive
-    server_thread.start()
-    
-    print("Server endpoint: http://localhost:42069/mcp/")
-    server_thread.join()
+def _request_id_from_path(path, suffix):
+    name = os.path.basename(path)
+    if not name.endswith(suffix):
+        return None
+    return name[:-len(suffix)]
+
+def _claim_next_request():
+    os.makedirs(REQUEST_DIR, exist_ok=True)
+    request_names = sorted(
+        name for name in os.listdir(REQUEST_DIR)
+        if name.endswith(REQUEST_SUFFIX)
+    )
+    for request_name in request_names:
+        request_id = _request_id_from_path(request_name, REQUEST_SUFFIX)
+        if not request_id:
+            continue
+        request_path = os.path.join(REQUEST_DIR, request_name)
+        running_path = os.path.join(REQUEST_DIR, f"{request_id}{RUNNING_SUFFIX}")
+        try:
+            os.replace(request_path, running_path)
+            return request_id, running_path
+        except OSError:
+            continue
+    return None, None
+
+def run_pending_request_once():
+    if not IN_HOPPER:
+        raise RuntimeError("run_pending_request_once() must be run inside Hopper")
+
+    request_id, running_path = _claim_next_request()
+    if not request_id:
+        message = f"No pending Hopper MCP request in {REQUEST_DIR}"
+        print(message)
+        _log(message)
+        return message
+
+    response_path = os.path.join(REQUEST_DIR, f"{request_id}{RESPONSE_SUFFIX}")
+    _log(f"processing request_id={request_id}")
+
+    try:
+        with open(running_path, "r", encoding="utf-8") as input_file:
+            request = json.load(input_file)
+        tool_name = request.get("tool")
+        args = request.get("args") or {}
+        if tool_name == "__ping__":
+            result = {
+                "name": mcp.name,
+                "tools": sorted(mcp.tools.keys()),
+                "document": doc.getDocumentName(),
+            }
+        else:
+            if tool_name not in mcp.tools:
+                raise ValueError(f"Unknown tool '{tool_name}'")
+            if not isinstance(args, dict):
+                raise ValueError("Tool args must be an object")
+            result = mcp.tools[tool_name](**args)
+        _json_dump_atomic(response_path, {
+            "ok": True,
+            "id": request_id,
+            "result": result,
+        })
+        _log(f"completed request_id={request_id} tool={tool_name}")
+        print(f"Hopper MCP request complete: {tool_name}")
+        return result
+    except Exception as exc:
+        error_text = traceback.format_exc()
+        _json_dump_atomic(response_path, {
+            "ok": False,
+            "id": request_id,
+            "error": str(exc),
+            "traceback": error_text,
+        })
+        _log(f"failed request_id={request_id}\n{error_text}")
+        try:
+            doc.log(error_text)
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            os.remove(running_path)
+        except OSError:
+            pass
+
+def start_hopper_mcp():
+    return run_pending_request_once()
 
 def cache_strings():
     print("Starting caching...")
     if create_string_caches_for_all_documents():
         print("Caching complete!")
-        print("To get started using the MCP server, paste this into the python prompt:")
-        print("\nlaunch_server()")
+        print("String search cache is ready for Hopper MCP requests.")
     else:
         print("String caching failed! Try saving all documents and pasting this again:")
         print("cache_strings()")
 
-if not "python" in sys.executable:
-    if not check_all_documents_have_string_caches():
-        print("Due to slow Hopper string APIs, we must create our own string caches.")
-        print("This process will take about 5-10 minutes per document and will save caches along side your hopper document saves.")
-        print("\nTo start this process now, paste this into the python prompt and go have a coffee:")
-        print("cache_strings()")
-        print("\nTo get started right away and yolo in the slow zone, paste launch_server() into the shell.")
-    else:
-        print("Congratulations! We found cached strings for your documents. The search_strings_regex() tool should now be FAST!")
-        print("To get started using the MCP server, paste this into the python prompt:")
-        print("\nlaunch_server()")
+if IN_HOPPER:
+    try:
+        _log("entered Hopper auto-start block")
+        if not check_all_documents_have_string_caches():
+            print("Due to slow Hopper string APIs, we must create our own string caches.")
+            print("This process will take about 5-10 minutes per document and will save caches along side your hopper document saves.")
+            print("\nTo start this process now, run this in the Python prompt when convenient:")
+            print("cache_strings()")
+            print("\nRunning one Hopper MCP request now. String searches may be slow.")
+        else:
+            print("Congratulations! We found cached strings for your documents. The search_strings_regex() tool should now be FAST!")
+        run_pending_request_once()
+    except Exception:
+        error_text = traceback.format_exc()
+        _log(error_text)
+        try:
+            doc.log(error_text)
+        except Exception:
+            pass
+        raise

@@ -14,6 +14,8 @@ import platform
 import argparse
 from pathlib import Path
 
+HOPPER_SCRIPT_NAMES = ['Hopper MCP Start Server.py', 'fastmcp_server.py']
+
 
 def get_hopper_script_dir():
     """Get Hopper script directory for current platform."""
@@ -41,14 +43,14 @@ def find_installation():
     print("🔍 Looking for existing installation...")
     
     hopper_dir = get_hopper_script_dir()
-    script_path = os.path.join(hopper_dir, 'fastmcp_server.py')
-    
-    if os.path.exists(script_path):
-        print(f"   ✅ Found installation: {script_path}")
-        return script_path
-    else:
-        print(f"   ❌ No installation found at: {script_path}")
-        return None
+    for script_name in HOPPER_SCRIPT_NAMES:
+        script_path = os.path.join(hopper_dir, script_name)
+        if os.path.exists(script_path):
+            print(f"   ✅ Found installation: {script_path}")
+            return script_path
+
+    print(f"   ❌ No installation found in: {hopper_dir}")
+    return None
 
 
 def remove_installation(script_path, dry_run=False):
